@@ -60,7 +60,8 @@ class RemoteFile:
 class DatasetSpec:
     """Registry entry for one source (plan §4.2/§4.3 tables)."""
     name: str
-    kind: str                        # 'hf_dataset' | 'http' | 'metadata_only'
+    kind: str                        # 'hf_dataset' | 'http' |
+                                     # 'metadata_only' | 'pending'
     license: str
     is_ai: Optional[bool]            # None = mixed real/AI content
     generator_family: Optional[str]  # default family; registrars may refine
@@ -173,6 +174,26 @@ REGISTRY: dict[str, DatasetSpec] = {s.name: s for s in [
                 notes="Song Describer Dataset, Zenodo record 10072001. "
                       "METADATA ONLY — the audio is the hidden-eval real "
                       "pool's parent and is strictly quarantined."),
+    # ------- ORGANIZER-PROVIDED — NOT YET RELEASED (plan §1.1) -----------
+    # Task wiki, re-verified 2026-08-26: "We plan to provide a training
+    # dataset to make the task easier to enter" / "The final training dataset
+    # will be announced before the submission phase." The organizers' own
+    # candidate list overlaps this registry almost exactly (SONICS, Muse,
+    # SunoCaps, Udio Dataset, Echoes; SDD, MusicNet, FMA Large, MTG-Jamendo).
+    # No repo id, no URL, no date yet.
+    DatasetSpec("mirex_provided", "pending", "TBD", None, None,
+                notes="Organizer-provided training set. NOT RELEASED as of "
+                      "2026-08-26. When announced: set kind + repo_id/files, "
+                      "add register_mirex_provided(), and re-run the "
+                      "quarantine gate before any training — the organizers' "
+                      "candidate mix names SDD as a human-music source, so "
+                      "their pool may itself carry hidden-eval lineage."),
+    DatasetSpec("mirex_baseline", "pending", "TBD", None, None,
+                notes="Organizer baseline model + checkpoint. NOT RELEASED "
+                      "as of 2026-08-26. Wiki: 'We plan to provide a baseline "
+                      "model and checkpoint to help participants get "
+                      "started.' Wire into baselines.py — see the "
+                      "MirexProvidedBaseline stub there."),
 ]}
 
 # --- Generator-family normalization (plan §4.2, config.TEST_FAMILIES) -----
@@ -245,12 +266,38 @@ def download_file(url: str, dest: Path, checksum: Optional[str] = None) -> Path:
     return dest
 
 
-def extract_archive(path: Path, dest_dir: Path) -> None:
-    """Unpack .zip / .tar.gz next to the archive (idempotent-ish: skips if a
-    same-stem directory already exists)."""
-    marker = dest_dir / (path.name.split(".")[0])
+def _extract_marker(dest_dir: Path, archive_name: str) -> Path:
+    """Sentinel recording that ``archive_name`` was fully unpacked here."""
+    return dest_dir / ".extracted" / f"{archive_name}.done"
+
+
+def extract_archive(path: Path, dest_dir: Path,
+                    keep_archive: bool = False) -> None:
+    """Unpack .zip / .tar.gz into ``dest_dir``, then delete the archive
+    unless ``keep_archive``.
+
+    Deleting is the default because it matters at this scale: fma_full is
+    879 GB of zip sitting on top of 879 GB of extracted audio, and the three
+    archived sources together retain ~903 GB for nothing (see HANDOFF.md §0).
+    A sentinel under ``.extracted/`` records the unpack so a later run neither
+    re-downloads nor re-extracts. Trees unpacked before this sentinel existed
+    are still recognized by the old heuristic (a directory named after the
+    archive stem); those archives are left alone, since we cannot confirm the
+    extraction completed.
+    """
+    marker = _extract_marker(dest_dir, path.name)
     if marker.exists():
-        logger.info("Extraction target %s exists, skipping unpack", marker)
+        logger.info("%s already extracted, skipping unpack", path.name)
+        return
+    legacy = dest_dir / path.name.split(".")[0]
+    if legacy.exists():
+        logger.info("%s appears already extracted (%s exists); marking. "
+                    "The archive is left in place — delete it by hand once "
+                    "you have confirmed the tree is complete.",
+                    path.name, legacy)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"archive": path.name,
+                                      "extracted_by": "legacy-detection"}))
         return
     logger.info("Extracting %s -> %s", path, dest_dir)
     if zipfile.is_zipfile(path):
@@ -261,6 +308,18 @@ def extract_archive(path: Path, dest_dir: Path) -> None:
             t.extractall(dest_dir)
     else:
         logger.warning("Unknown archive format, leaving as-is: %s", path)
+        return
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"archive": path.name,
+                                  "bytes": path.stat().st_size}))
+    if keep_archive:
+        logger.info("--keep-archives: retaining %s (%.1f GB)",
+                    path.name, path.stat().st_size / 2**30)
+        return
+    freed = path.stat().st_size / 2**30
+    path.unlink()
+    logger.info("Removed archive %s after extraction (freed %.1f GB)",
+                path.name, freed)
 
 
 def _hf_subset_patterns(repo_id: str, subset_gb: float) -> list[str]:
@@ -299,13 +358,22 @@ def fetch_hf(spec: DatasetSpec, metadata_only: bool,
 
 
 def fetch_http(spec: DatasetSpec, metadata_only: bool,
-               subset_gb: Optional[float]) -> None:
-    """Download the spec's RemoteFiles (streaming, resumable, checksummed)."""
+               subset_gb: Optional[float],
+               keep_archives: bool = False) -> None:
+    """Download the spec's RemoteFiles (streaming, resumable, checksummed).
+
+    Archives whose ``.extracted`` sentinel is present are skipped outright —
+    without that check, deleting an archive after unpacking would make the
+    next run re-download it."""
     budget = None if subset_gb is None else subset_gb
     used = 0.0
     for rf in spec.files:
         if metadata_only and not rf.metadata:
             logger.info("--metadata-only: skipping %s", rf.filename)
+            continue
+        if not rf.metadata and _extract_marker(spec.dest, rf.filename).exists():
+            logger.info("%s already extracted under %s; skipping download",
+                        rf.filename, spec.dest)
             continue
         if (budget is not None and not rf.metadata
                 and used + rf.approx_gb > budget):
@@ -316,7 +384,7 @@ def fetch_http(spec: DatasetSpec, metadata_only: bool,
         if not rf.metadata:
             used += rf.approx_gb
         if path.suffix in {".zip", ".gz", ".tar"}:
-            extract_archive(path, spec.dest)
+            extract_archive(path, spec.dest, keep_archive=keep_archives)
     if spec.name == "mtg_jamendo":
         logger.warning("MTG-Jamendo AUDIO is not auto-fetched. %s", spec.notes)
 
@@ -625,16 +693,22 @@ REGISTRARS: dict[str, Callable[[MetadataDatabase], int]] = {
 def fetch_dataset(name: str, metadata_only: bool = False,
                   subset_gb: Optional[float] = None,
                   register_only: bool = False,
-                  db: Optional[MetadataDatabase] = None) -> None:
+                  db: Optional[MetadataDatabase] = None,
+                  keep_archives: bool = False) -> None:
     """Fetch one dataset then register it (plan §14 phase P1)."""
     spec = REGISTRY[name]
+    if spec.kind == "pending":
+        # Placeholder for a resource the organizers have announced but not
+        # released; skipped (not an error) so --dataset all keeps working.
+        logger.warning("%s: not released yet, skipping. %s", name, spec.notes)
+        return
     if not register_only:
         if spec.kind == "hf_dataset":
             fetch_hf(spec, metadata_only, subset_gb)
         elif spec.kind == "metadata_only":
             fetch_sdd(spec)
         else:
-            fetch_http(spec, metadata_only, subset_gb)
+            fetch_http(spec, metadata_only, subset_gb, keep_archives)
     try:
         REGISTRARS[name](db or MetadataDatabase())
     except FileNotFoundError as exc:
@@ -652,6 +726,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="fetch only ~first N GB of audio shards (dev)")
     parser.add_argument("--register-only", action="store_true",
                         help="skip downloads; (re)walk local files into the DB")
+    parser.add_argument("--keep-archives", action="store_true",
+                        help="keep .zip/.tar.gz after extraction (default is "
+                             "to delete them; ~903 GB across fma_full, "
+                             "fakemusiccaps and musicnet)")
     args = parser.parse_args(argv)
 
     config.ensure_dirs()
@@ -660,7 +738,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     for name in names:
         logger.info("=== %s (%s) ===", name, REGISTRY[name].kind)
         fetch_dataset(name, args.metadata_only, args.subset_gb,
-                      args.register_only, db=db)
+                      args.register_only, db=db,
+                      keep_archives=args.keep_archives)
     db.census(write=True)
     return 0
 

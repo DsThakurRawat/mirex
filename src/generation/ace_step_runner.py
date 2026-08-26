@@ -21,8 +21,13 @@ sampler settings, and the eval 'difficulty' stratum likely encodes exactly
 this"): ``infer_step`` in {27, 60}, ``guidance_scale`` in {7.5, 10.0, 15.0},
 scheduler euler/heun — all drawn deterministically from the style seed.
 
+dtype: defaults to ``"auto"`` — bfloat16 on Ampere or newer, float32
+otherwise. ACE-Step accepts no fp16, and Volta/Pascal (every DGX-1) have no
+bf16 units, so a hardcoded "bfloat16" fails there. See resolve_dtype().
+
 Environment: ``ACE_STEP_REPO``, ``ACE_STEP_CHECKPOINT``, ``ACE_STEP_PYTHON``
-(interpreter for subprocess mode), ``ACE_STEP_TIMEOUT_S``.
+(interpreter for subprocess mode), ``ACE_STEP_TIMEOUT_S``, ``ACE_STEP_DTYPE``
+(forces the dtype, bypassing autodetection).
 """
 from __future__ import annotations
 
@@ -75,15 +80,48 @@ def sample_settings(style: dict) -> dict:
     }
 
 
+def resolve_dtype(requested: str = "auto") -> str:
+    """Pick a dtype ACE-Step will actually accept on this GPU.
+
+    The pipeline takes ``"bfloat16"`` or ``"float32"`` only — there is no fp16
+    path, so the fallback for a card without bf16 is fp32, not half.
+
+    bf16 is native from Ampere (sm_80) onward. Volta (V100, sm_70) and Pascal
+    (P100, sm_60) — i.e. every DGX-1 — have no bf16 units. We test the compute
+    capability directly rather than ``torch.cuda.is_bf16_supported()``, which
+    in torch >= 2.6 reports True on older cards via slow emulation.
+    """
+    if requested != "auto":
+        return requested
+    override = os.environ.get("ACE_STEP_DTYPE")
+    if override:
+        return override
+    try:
+        import torch
+    except ImportError:
+        return "float32"
+    if not torch.cuda.is_available():
+        return "float32"
+    major, minor = torch.cuda.get_device_capability()
+    if major >= 8:
+        return "bfloat16"
+    logger.warning(
+        "GPU %s is compute capability %d.%d — no native bf16; falling back to "
+        "float32. Expect roughly 2x the memory and a slower campaign. Set "
+        "ACE_STEP_DTYPE to override.",
+        torch.cuda.get_device_name(0), major, minor)
+    return "float32"
+
+
 class AceStepRunner:
     """Drives ACE-Step for one job at a time (GPU-bound; use --workers 1)."""
 
     def __init__(self, checkpoint_dir: Optional[str] = None,
-                 dtype: str = "bfloat16",
+                 dtype: str = "auto",
                  timeout_s: Optional[float] = None):
         self.checkpoint_dir = (checkpoint_dir
                                or os.environ.get("ACE_STEP_CHECKPOINT") or "")
-        self.dtype = dtype
+        self.dtype = resolve_dtype(dtype)
         self.timeout_s = timeout_s if timeout_s is not None else float(
             os.environ.get("ACE_STEP_TIMEOUT_S", "1800"))
         self._pipeline = None            # lazy; heavy (torch) import

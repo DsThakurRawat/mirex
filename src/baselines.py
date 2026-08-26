@@ -6,6 +6,8 @@
 2. FakeprintGBDT (models.branch_c_physics) on the fuller feature set.
 3. Branch A itself trained on SONICS-only replicates the MIREX-2025
    wav2vec2+AASIST baseline setting (run via train.py, not here).
+4. MirexProvidedBaseline: the organizers' own baseline — announced but not
+   released as of 2026-08-26 (stub below).
 """
 from __future__ import annotations
 
@@ -14,6 +16,28 @@ import torch
 
 import config
 from features import comb_peak_energies, estimate_cutoff_hz
+
+
+class MirexProvidedBaseline:
+    """The organizers' baseline model — NOT RELEASED as of 2026-08-26.
+
+    Task wiki: "We plan to provide a baseline model and checkpoint to help
+    participants get started." The page names no architecture and gives no
+    download link; it lists only intended components (a standard audio
+    classifier, or an audio foundation model with a binary head, plus a
+    reproducible inference pipeline and example scripts).
+
+    This is the number the organizers will quote, so when it lands it becomes
+    the floor every branch must clear *per stratum* on the harness, not just
+    pooled — see plan §1.1 and the `mirex_baseline` stub in data_fetch.py.
+    """
+
+    NOT_RELEASED = (
+        "MIREX 2026 baseline model not released as of 2026-08-26. See "
+        "https://music-ir.org/mirex/wiki/2026:AI-Generated_Music_Detection")
+
+    def __init__(self, checkpoint_path=None):     # noqa: ARG002
+        raise NotImplementedError(self.NOT_RELEASED)
 
 
 class FakeprintLR:
