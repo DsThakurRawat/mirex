@@ -6,43 +6,86 @@ Companion docs: `HANDOFF.md` (what's left + storage budget),
 
 ---
 
-## Just run the scripts
+## Just run it
 
-Everything below is wrapped in numbered, resumable scripts. If you only want to
-execute, use these and skip the prose:
+One cross-platform driver, `run.py`. Stdlib-only, so it works on the system
+Python before the venv it creates exists — same commands on Linux, macOS and
+Windows.
 
 ```bash
-export MIREX_DATA_DIR=/raid/mirex/data
+export MIREX_DATA_DIR=/raid/mirex/data          # POSIX
 export MIREX_CHECKPOINT_DIR=/raid/mirex/checkpoints
 export HF_HOME=/raid/mirex/hf_cache
 
-./scripts/00_preflight.sh        # GPU, capability, disk, ffmpeg
-./scripts/01_setup.sh            # venv, deps, 107 tests
-./scripts/02_fetch_data.sh       # the 501 GB sample + registration
+python3 run.py preflight     # GPUs, compute capability, disk, ffmpeg
+python3 run.py setup         # venv, deps, 107 tests
+python3 run.py fetch         # the 501 GB sample + registration
 export MUREKA_API_KEY=... MINIMAX_API_KEY=...
-./scripts/03_generate.sh         # ACE-Step / YuE / Mureka / MiniMax -> FLAC
-./scripts/04_quarantine_gate.sh  # HARD GATE
-./scripts/05_confound_gate.sh    # HARD GATE
-./scripts/06_harness.sh          # freeze dev set, materialize strata
-./scripts/07_train_all.sh        # 35 jobs across your GPUs
-./scripts/08_fusion.sh           # stacked fusion + calibration
-./scripts/09_container.sh        # offline Docker + runtime rehearsal
+python3 run.py generate      # ACE-Step / YuE / Mureka / MiniMax -> FLAC
+python3 run.py quarantine    # HARD GATE
+python3 run.py confound      # HARD GATE
+python3 run.py harness       # freeze dev set, materialize strata
+python3 run.py train         # 35 jobs across the GPUs
+python3 run.py fusion        # stacked fusion + calibration
+python3 run.py container     # offline Docker + runtime rehearsal
 ```
 
-See `scripts/README.md`. The rest of this document explains what each step does
-and why the two gates matter. Every script is reproduced in full in Appendix A
-(bash) and Appendix B (PowerShell) at the end of this file.
+`python3 run.py all` chains everything from `setup` to `fusion`, stopping if a
+gate fails. Every step is resumable — re-run after any interruption.
+
+On Windows the only change is the export syntax:
+
+```powershell
+$env:MIREX_DATA_DIR       = "D:\mirex\data"
+$env:MIREX_CHECKPOINT_DIR = "D:\mirex\checkpoints"
+$env:HF_HOME              = "D:\mirex\hf_cache"
+python run.py preflight
+```
+
+### Useful flags
+
+```bash
+python3 run.py fetch     --mtg-cap 120        # smaller MTG slice
+python3 run.py confound  --audit-n 1500       # faster gate check
+python3 run.py train     --branches ab --epochs 20 --gpus 4
+python3 run.py train     --workers 2          # default 6, or 2 on Windows
+python3 run.py container --rehearsal /raid/mirex/rehearsal
+```
+
+### What each step does
+
+| Step | Does | Roughly |
+|---|---|---|
+| `preflight` | GPU count, compute capability, free space, ffmpeg | seconds |
+| `setup` | venv, dependencies, 107 tests | 5 min |
+| `fetch` | 501 GB sample, MTG capped at 190 GB, registration, census | hours–days |
+| `generate` | dry-run creds, four backends, WAV→FLAC | days |
+| `quarantine` | **hard gate** — zero SDD overlap | minutes |
+| `confound` | **hard gate** — probe AUROC < 0.60, prints leak table | ~20 min |
+| `harness` | freeze dev set, materialize strata | ~1 h |
+| `train` | 35 jobs, one GPU each, skips finished folds | days–weeks |
+| `fusion` | stacked fusion + isotonic calibration | minutes |
+| `container` | hf_cache, Docker build, offline rehearsal + timing | ~1 h |
+
+The shell scripts in `scripts/` (bash) and `scripts/win/` (PowerShell) do the
+same thing and remain for reference; `run.py` supersedes both. The Python
+helpers in `scripts/lib/` are shared by all three.
+
+The rest of this document explains what each step does and why the two gates
+matter. Every script is reproduced in full in Appendix A (bash) and Appendix B
+(PowerShell) at the end of this file.
 
 ---
 
 ## Windows
 
+**Use `run.py`** — it is cross-platform by construction and needs no ports.
+The rest of this section covers the shell alternatives.
+
 The bash scripts do **not** run on native Windows. They use `mkfifo` (the GPU
 scheduler), `du -sb`, `nproc`, `free`, `lsblk`, and `VAR=value command`
 prefixes. Git Bash does not implement `mkfifo` usefully either, so step 07
-cannot work there.
-
-Two supported paths:
+cannot work there. If you prefer shell:
 
 ### WSL2 — recommended, scripts run unchanged
 

@@ -1,4 +1,14 @@
-# Scripts — run these in order
+# Scripts
+
+**`python3 run.py` in the repo root supersedes everything here** — one
+cross-platform driver, same commands on Linux, macOS and Windows. See
+RUNBOOK.md. These shell scripts remain for reference and do the same work.
+
+The Python helpers in `lib/` are shared by `run.py` and both shell pipelines.
+
+---
+
+# Shell scripts — run these in order
 
 Linux/macOS: `scripts/*.sh`. Windows: `scripts/win/*.ps1` (PowerShell 7+), or —
 better — run the bash scripts unchanged under WSL2. See RUNBOOK.md § Windows.
