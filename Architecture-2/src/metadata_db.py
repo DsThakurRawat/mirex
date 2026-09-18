@@ -88,6 +88,12 @@ class MetadataDatabase:
                 [(a,) for a in artist_ids])
             return cur.rowcount
 
+    def delete_source(self, source_dataset: str) -> int:
+        """Remove all tracks belonging to source_dataset (e.g. before re-registration)."""
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM tracks WHERE source_dataset=?", (source_dataset,))
+            return cur.rowcount
+
     def fetch(self, where: str = "1=1", params: tuple = ()) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(

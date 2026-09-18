@@ -240,26 +240,46 @@ def verify_checksum(path: Path, checksum: str) -> None:
     logger.info("Checksum OK (%s) for %s", algo, path.name)
 
 
-def download_file(url: str, dest: Path, checksum: Optional[str] = None) -> Path:
-    """Streaming HTTP download with resume (Range) + optional checksum."""
+def download_file(url: str, dest: Path, checksum: Optional[str] = None,
+                  max_retries: int = 100) -> Path:
+    """Streaming HTTP download with resume (Range) + optional checksum + auto-retry."""
+    import time
     import requests
     if dest.exists():
         logger.info("Already present, skipping: %s", dest)
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
-    offset = part.stat().st_size if part.exists() else 0
-    headers = {"Range": f"bytes={offset}-"} if offset else {}
-    logger.info("Downloading %s -> %s (resume at %d)", url, dest, offset)
-    with requests.get(url, stream=True, headers=headers, timeout=120) as r:
-        if r.status_code == 416:          # range beyond EOF: already complete
-            logger.info("Server reports file already complete: %s", part)
-        else:
-            r.raise_for_status()
-            mode = "ab" if (offset and r.status_code == 206) else "wb"
-            with open(part, mode) as f:
-                for block in r.iter_content(chunk_size=1 << 20):
-                    f.write(block)
+
+    retries = 0
+    while True:
+        offset = part.stat().st_size if part.exists() else 0
+        headers = {"Range": f"bytes={offset}-"} if offset else {}
+        logger.info("Downloading %s -> %s (resume at %d)", url, dest, offset)
+        try:
+            with requests.get(url, stream=True, headers=headers, timeout=120) as r:
+                if r.status_code == 416:          # range beyond EOF: already complete
+                    logger.info("Server reports file already complete: %s", part)
+                    break
+                r.raise_for_status()
+                mode = "ab" if (offset and r.status_code == 206) else "wb"
+                with open(part, mode) as f:
+                    for block in r.iter_content(chunk_size=1 << 20):
+                        if block:
+                            f.write(block)
+            break
+        except (requests.RequestException, Exception) as exc:
+            retries += 1
+            if retries > max_retries:
+                raise RuntimeError(
+                    f"Download failed for {url} after {max_retries} retries: {exc}"
+                ) from exc
+            new_offset = part.stat().st_size if part.exists() else 0
+            logger.warning(
+                "Connection dropped (%s). Retrying in 5s... (progress: %.2f MB downloaded, retry %d/%d)",
+                exc, new_offset / 2**20, retries, max_retries)
+            time.sleep(5)
+
     if checksum:
         verify_checksum(part, checksum)
     part.rename(dest)
@@ -629,7 +649,9 @@ def register_sonics(db: MetadataDatabase) -> int:
     """SONICS: real/fake CSV manifests; 'algorithm'/'source' -> family/version."""
     spec = REGISTRY["sonics"]
     root = _require(spec.dest, spec.name)
+    audio_by_stem = {p.stem: p for p in _walk_audio(root)}
     rows = []
+    seen_ids = set()
     for csv_path in sorted(root.rglob("*.csv")):
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -639,17 +661,32 @@ def register_sonics(db: MetadataDatabase) -> int:
             fake_manifest = "fake" in csv_path.name.lower()
             for i, rec in enumerate(reader):
                 rel = rec.get("filepath") or rec.get("filename") or ""
-                native = str(rec.get("id") or Path(rel).stem or
-                             f"{csv_path.stem}_{i}")
+                stem = Path(rel).stem
+                audio_path = audio_by_stem.get(stem)
+                if audio_path is None:
+                    for cand in (root / rel, root / f"{rel}.mp3"):
+                        if cand.is_file():
+                            audio_path = cand
+                            break
+                if audio_path is None:
+                    continue  # skip tracks whose audio is not present on disk
+
+                native = stem or str(rec.get("id") or f"{csv_path.stem}_{i}")
+                if native in seen_ids:
+                    continue
+                seen_ids.add(native)
+
                 algo = rec.get("algorithm") or rec.get("source") or ""
                 family = normalize_family(algo) if fake_manifest else "human"
                 rows.append(_row(
-                    spec, native, str(root / rel),
+                    spec, native, str(audio_path),
                     family=family, is_ai=fake_manifest,
                     version=(algo or None) if fake_manifest else None,
                     duration=float(rec["duration"]) if rec.get("duration")
                     else None,
                     extra={"manifest": csv_path.name}))
+    if rows:
+        db.delete_source(spec.name)
     return _insert(db, rows, spec.name)
 
 
