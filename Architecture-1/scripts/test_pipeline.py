@@ -14,11 +14,16 @@ Run:
     python -m unittest test_pipeline.py
 """
 import os
+import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
 import torch
+
+_MIREX_DIR = Path(__file__).resolve().parent.parent / "mirex"
+if str(_MIREX_DIR) not in sys.path:
+    sys.path.insert(0, str(_MIREX_DIR))
 
 import config
 from dataset import (

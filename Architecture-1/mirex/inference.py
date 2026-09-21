@@ -86,6 +86,16 @@ class MusicScopeCLScorer:
         self.fusion.load_state_dict(fc["model_state"])
         self.fusion.eval()
 
+        # If fusion head expects SupCon projection dim (128) and head not yet loaded, auto-load default
+        if self.supcon_head is None and in_dim == config.SUPCON_PROJ_DIM:
+            default_supcon = config.CHECKPOINT_DIR / "supcon_best.pt"
+            if default_supcon.exists():
+                self.supcon_head = SupConProjectionHead().to(self.device)
+                sc = torch.load(str(default_supcon), map_location=self.device, weights_only=True)
+                self.supcon_head.load_state_dict(sc["proj_head_state"])
+                self.supcon_head.eval()
+                print(f"[Scorer] Auto-loaded matching SupCon head from {default_supcon}")
+
         # --- Temperature scaler (optional) ---
         self.scaler = None
         if temp_scaler_ckpt and Path(temp_scaler_ckpt).exists():

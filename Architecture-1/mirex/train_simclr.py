@@ -48,9 +48,9 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor,
     z = torch.cat([z1, z2], dim=0)  # (2B, D)
     sim = torch.matmul(z, z.T) / temperature  # (2B, 2B)
 
-    # Mask out self-similarity
+    # Mask out self-similarity (use -1e4 to avoid FP16 half precision overflow)
     mask = torch.eye(2 * batch_size, dtype=torch.bool, device=z.device)
-    sim.masked_fill_(mask, -9e15)
+    sim.masked_fill_(mask, -1e4)
 
     # Positive pairs: (i, i+B) and (i+B, i)
     positives = torch.cat([
