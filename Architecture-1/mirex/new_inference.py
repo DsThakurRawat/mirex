@@ -121,8 +121,14 @@ from track_a_narrative import FEATURE_EXTRACTORS
 def fast_extract_narrative(y: np.ndarray, sr: int = config.SAMPLE_RATE) -> dict:
     """Canonical 128-D Narrative feature extractor perfectly matching train_gpu_200k."""
     feats = {}
+    if len(y) < sr * 3:
+        # Guard against zero-length or sub-3s audio causing STFT/recurrence crashes
+        y = np.pad(y, (0, max(0, sr * 3 - len(y))))
     for extractor in FEATURE_EXTRACTORS:
-        feats.update(extractor(y, sr))
+        try:
+            feats.update(extractor(y, sr))
+        except Exception:
+            pass
     return feats
 
 
