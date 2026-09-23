@@ -184,6 +184,13 @@ def generate_publication_scorecard(df_results: pd.DataFrame, output_png: Path):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate 28k Held-Out Benchmark")
+    parser.add_argument("--fresh", action="store_true", help="Force fresh re-scoring of all 28,134 tracks with updated models")
+    parser.add_argument("--workers", type=int, default=20, help="Number of CPU worker processes")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for GPU forward passes")
+    args = parser.parse_args()
+
     split_path = config.PROCESSED_DATA_DIR / "train_val_split_200k.parquet"
     if not split_path.exists():
         raise FileNotFoundError(f"Split file not found at {split_path}")
@@ -194,22 +201,28 @@ def main():
     total_val = len(df_val)
     print(f"      Loaded {total_val:,d} unseen tracks ({df_val['is_ai'].sum():,d} AI vs {(df_val['is_ai']==0).sum():,d} Human).\n")
 
-    # Check for existing checkpoint results to allow auto-resume
-    results_csv = _SCRIPTS_DIR / "eval_28k_results.csv"
-    ckpt_parquet = config.PROCESSED_DATA_DIR / "eval_28k_checkpoint.parquet"
+    # Output paths (separate for fresh run vs legacy)
+    if args.fresh:
+        results_csv = _SCRIPTS_DIR / "eval_28k_retrained_results.csv"
+        ckpt_parquet = config.PROCESSED_DATA_DIR / "eval_28k_retrained_checkpoint.parquet"
+        scorecard_png = _SCRIPTS_DIR / "eval_28k_retrained_analysis.png"
+    else:
+        results_csv = _SCRIPTS_DIR / "eval_28k_results.csv"
+        ckpt_parquet = config.PROCESSED_DATA_DIR / "eval_28k_checkpoint.parquet"
+        scorecard_png = _SCRIPTS_DIR / "eval_28k_analysis.png"
 
     existing_df = None
-    if ckpt_parquet.exists():
+    if ckpt_parquet.exists() and not args.fresh:
         existing_df = pd.read_parquet(ckpt_parquet)
         nan_count = existing_df["score"].isna().sum()
         print(f"[Auto-Resume] Found existing evaluation checkpoint with {len(existing_df):,d} tracks ({nan_count:,d} NaNs).")
         if len(existing_df) >= total_val and nan_count == 0:
             print("      Evaluation already completed with 100% valid scores! Generating scorecard...")
-            generate_publication_scorecard(existing_df, _SCRIPTS_DIR / "eval_28k_analysis.png")
+            generate_publication_scorecard(existing_df, scorecard_png)
             return
 
     # Initialize Fast Scorer
-    scorer = FastMusicScopeScorer()
+    scorer = FastMusicScopeScorer(threshold=config.DEFAULT_DECISION_THRESHOLD)
 
     # Determine remaining tracks
     if existing_df is not None:
@@ -236,7 +249,7 @@ def main():
 
     for c_idx in range(0, len(paths_to_score), chunk_sz):
         sub_paths = paths_to_score[c_idx:c_idx + chunk_sz]
-        chunk_results = scorer.score_directory(sub_paths, batch_size=128, workers=20)
+        chunk_results = scorer.score_directory(sub_paths, batch_size=args.batch_size, workers=args.workers)
 
         # Merge metadata with direct 1-to-1 order mapping
         sub_df = df_to_score.iloc[c_idx:c_idx + len(sub_paths)].copy()
@@ -258,7 +271,7 @@ def main():
 
     # Generate Publication Scorecard
     print("\n[4/4] Generating Publication Scorecard Dashboard...")
-    generate_publication_scorecard(df_final, _SCRIPTS_DIR / "eval_28k_analysis.png")
+    generate_publication_scorecard(df_final, scorecard_png)
 
 
 if __name__ == "__main__":
