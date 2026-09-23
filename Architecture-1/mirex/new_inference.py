@@ -194,6 +194,10 @@ def fast_extract_narrative(y: np.ndarray, sr: int = config.SAMPLE_RATE) -> dict:
     return feats
 
 
+# Alias for backward compatibility
+extract_features_single = fast_extract_narrative
+
+
 def _extract_task(path_str: str):
     """Worker task: reads 30s audio chunk once and computes 128-D narrative.
     Returns int16 PCM to prevent Windows named pipe buffer overflow."""
@@ -242,9 +246,23 @@ class FastMusicScopeScorer:
         supcon_ckpt: str | None = None,
         fusion_ckpt: str | None = None,
         device: str | None = None,
+        threshold: float | None = None,
+        mode: str = "balanced",
     ):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         print(f"[FastScorer] Initialized on: {self.device} ({torch.cuda.get_device_name(0) if self.device.type == 'cuda' else 'CPU'})")
+
+        # Operational Decision Thresholds
+        if threshold is not None:
+            self.threshold = float(threshold)
+        elif mode == "strict":
+            self.threshold = config.THRESHOLD_STRICT
+        elif mode == "conservative":
+            self.threshold = config.THRESHOLD_CONSERVATIVE
+        else:
+            self.threshold = config.THRESHOLD_BALANCED
+        self.mode = mode
+        print(f"[FastScorer] Operational Mode: {self.mode.upper()} | Decision Threshold: {self.threshold:.4f}")
 
         ckpt_dir = config.CHECKPOINT_DIR
 
@@ -393,10 +411,13 @@ class FastMusicScopeScorer:
                     probs = self.unified_model(specs_t, narr_t).cpu().numpy()
 
                 for p, prob in zip(valid_paths, probs):
+                    is_ai = float(prob) >= self.threshold
+                    trigger = f"Calibrated_P({prob:.3f}>={self.threshold:.2f})" if is_ai else "Pass_Human"
                     results.append({
                         "filename": Path(p).name,
                         "score": float(prob),
-                        "prediction": "AI" if prob >= 0.50 else "Human",
+                        "prediction": "AI" if is_ai else "Human",
+                        "trigger": trigger,
                         "file_path": p
                     })
 
@@ -410,7 +431,7 @@ class FastMusicScopeScorer:
             out_p = Path(output_csv)
             out_p.parent.mkdir(parents=True, exist_ok=True)
             with open(out_p, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["filename", "score", "prediction", "file_path"])
+                writer = csv.DictWriter(f, fieldnames=["filename", "score", "prediction", "trigger", "file_path"])
                 writer.writeheader()
                 writer.writerows(results)
             print(f"\n[Done] Successfully wrote {len(results):,d} predictions to {output_csv}")
@@ -425,6 +446,8 @@ def main():
     parser.add_argument("--output_csv", type=str, default="predictions.csv", help="Output CSV path")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size for GPU scoring")
     parser.add_argument("--workers", type=int, default=min(20, os.cpu_count() or 4), help="CPU worker count")
+    parser.add_argument("--threshold", type=float, default=None, help=f"Decision threshold (default: {config.DEFAULT_DECISION_THRESHOLD})")
+    parser.add_argument("--mode", type=str, default="balanced", choices=["balanced", "strict", "conservative"], help="Operating preset: balanced (T=0.18), strict (T=0.05), conservative (T=0.50)")
     parser.add_argument("--simclr_ckpt", type=str, default=None)
     parser.add_argument("--supcon_ckpt", type=str, default=None)
     parser.add_argument("--fusion_ckpt", type=str, default=None)
@@ -436,16 +459,18 @@ def main():
         supcon_ckpt=args.supcon_ckpt,
         fusion_ckpt=args.fusion_ckpt,
         device=args.device,
+        threshold=args.threshold,
+        mode=args.mode,
     )
 
     if args.input:
         t0 = time.perf_counter()
         prob = scorer.score_single(args.input)
         lat = (time.perf_counter() - t0) * 1000
-        label = "AI-Generated" if prob >= 0.50 else "Human Original"
+        label = "AI-Generated" if prob >= scorer.threshold else "Human Original"
         print("=" * 60)
         print(f"  Track      : {args.input}")
-        print(f"  P(AI)      : {prob:.4f} ({label})")
+        print(f"  P(AI)      : {prob:.4f} (Threshold: {scorer.threshold:.4f} -> {label})")
         print(f"  Latency    : {lat:.1f} ms")
         print("=" * 60)
     elif args.input_dir:
