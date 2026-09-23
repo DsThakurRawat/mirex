@@ -47,8 +47,9 @@ from train_supcon import SupConProjectionHead
 
 def fast_load_audio_chunk(path: str | Path, sr: int = config.SAMPLE_RATE,
                           duration: float = config.CHUNK_SECONDS,
-                          offset: float = 0.0) -> np.ndarray:
-    """Blazingly fast 30s audio loader using SoundFile C-level seek + SOXR resampler."""
+                          offset: float = 0.0,
+                          pad: bool = True) -> np.ndarray:
+    """Fast 30s audio loader using SoundFile C-level seek + SOXR resampler."""
     target_len = int(sr * duration)
     try:
         with sf.SoundFile(str(path)) as f:
@@ -65,7 +66,7 @@ def fast_load_audio_chunk(path: str | Path, sr: int = config.SAMPLE_RATE,
         if orig_sr != sr:
             data = soxr.resample(data, orig_sr, sr)
 
-        if len(data) < target_len:
+        if pad and len(data) < target_len:
             data = np.pad(data, (0, target_len - len(data)))
         elif len(data) > target_len:
             data = data[:target_len]
@@ -74,11 +75,13 @@ def fast_load_audio_chunk(path: str | Path, sr: int = config.SAMPLE_RATE,
         # Fallback to librosa if soundfile hits obscure codec
         try:
             y, _ = librosa.load(str(path), sr=sr, mono=True, duration=duration, offset=offset)
-            if len(y) < target_len:
+            if pad and len(y) < target_len:
                 y = np.pad(y, (0, target_len - len(y)))
-            return y[:target_len].astype(np.float32)
+            elif len(y) > target_len:
+                y = y[:target_len]
+            return y.astype(np.float32)
         except Exception:
-            return np.zeros(target_len, dtype=np.float32)
+            return np.zeros(target_len if pad else 0, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -112,85 +115,14 @@ def _stats(x: np.ndarray, prefix: str, n_percentiles: int = 3) -> dict:
     return d
 
 
+from track_a_narrative import FEATURE_EXTRACTORS
+
+
 def fast_extract_narrative(y: np.ndarray, sr: int = config.SAMPLE_RATE) -> dict:
-    """Extracts the 128-D Narrative vector with cached CQT (saving ~350ms per track)."""
+    """Canonical 128-D Narrative feature extractor perfectly matching train_gpu_200k."""
     feats = {}
-
-    # 1. Harmonic Features (CQT computed ONCE and cached)
-    chroma_cqt = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_norm = chroma_cqt / (np.sum(chroma_cqt, axis=0, keepdims=True) + 1e-9)
-    entropy_per_frame = -np.sum(chroma_norm * np.log(chroma_norm + 1e-9), axis=0)
-    entropy_per_frame /= np.log(12.0)
-    feats.update(_stats(entropy_per_frame, "harm_entropy"))
-
-    mean_profile = np.mean(chroma_cqt, axis=1)
-    diffs = np.abs(np.diff(mean_profile))
-    feats["harm_tension_mean"] = float(np.mean(diffs))
-    feats["harm_tension_std"] = float(np.std(diffs))
-    feats["harm_tension_max"] = float(np.max(diffs)) if len(diffs) > 0 else 0.0
-
-    delta_chroma = np.diff(chroma_cqt, axis=1)
-    dist = np.sqrt(np.sum(delta_chroma ** 2, axis=0))
-    feats.update(_stats(dist, "harm_distance"))
-
-    # 2. Rhythmic Micro-timing (20 dims)
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    feats.update(_stats(onset_env, "rhythm_onset_env"))
-    peaks = librosa.util.peak_pick(onset_env, pre_max=3, post_max=3, pre_avg=3, post_avg=3, delta=0.5, wait=5)
-    if len(peaks) > 1:
-        ioi = np.diff(peaks) * (512 / sr)
-        feats.update(_stats(ioi, "rhythm_ioi", n_percentiles=2))
-        feats["rhythm_ioi_cv"] = float(np.std(ioi) / (np.mean(ioi) + 1e-9))
-    else:
-        for k in ["mean", "std", "skew", "kurtosis", "min", "max", "delta_mean", "delta_std", "p10", "p90"]:
-            feats[f"rhythm_ioi_{k}"] = 0.0
-        feats["rhythm_ioi_cv"] = 0.0
-
-    # 3. Motivic Recurrence Rate (Reuse cached chroma_cqt!) (22 dims)
-    mel_40 = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=40)
-    log_mel_40 = librosa.power_to_db(mel_40, ref=np.max)
-
-    ssm_chroma = librosa.segment.recurrence_matrix(chroma_cqt, mode="affinity", sym=True)
-    diag_strengths = np.array([np.mean(np.diag(ssm_chroma, k=k)) for k in range(1, min(ssm_chroma.shape[0], 50))])
-    feats.update(_stats(diag_strengths, "motif_chroma_diag"))
-    feats["motif_chroma_recurrence"] = float(np.mean(ssm_chroma))
-
-    ssm_mel = librosa.segment.recurrence_matrix(log_mel_40, mode="affinity", sym=True)
-    diag_mel = np.array([np.mean(np.diag(ssm_mel, k=k)) for k in range(1, min(ssm_mel.shape[0], 50))])
-    feats.update(_stats(diag_mel, "motif_mel_diag"))
-
-    # Trim motivic to exact 22 dims
-    keep_motif = {k: v for k, v in feats.items() if k.startswith("motif_chroma")}
-    mel_keys = [k for k in feats if k.startswith("motif_mel_diag")]
-    for k in mel_keys[:10]:
-        keep_motif[k] = feats[k]
-
-    # Clean motif keys
-    for k in list(feats.keys()):
-        if k.startswith("motif_"):
-            del feats[k]
-    feats.update(keep_motif)
-
-    # 4. Spectral Density (36 dims)
-    flatness = librosa.feature.spectral_flatness(y=y)[0]
-    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
-    feats.update(_stats(flatness, "spec_flatness"))
-    feats.update(_stats(rolloff, "spec_rolloff"))
-    feats.update(_stats(centroid, "spec_centroid"))
-    feats["spec_bandwidth_mean"] = float(np.mean(bandwidth))
-    feats["spec_bandwidth_std"] = float(np.std(bandwidth))
-    feats["spec_bandwidth_skew"] = float(stats.skew(bandwidth))
-
-    # 5. Dynamic Envelope (24 dims)
-    rms = librosa.feature.rms(y=y)[0]
-    zcr = librosa.feature.zero_crossing_rate(y=y)[0]
-    feats.update(_stats(rms, "dyn_rms"))
-    feats.update(_stats(zcr, "dyn_zcr"))
-    feats["dyn_loudness_range"] = float(np.percentile(rms, 95) - np.percentile(rms, 5))
-    feats["dyn_crest_factor"] = float(np.max(np.abs(y)) / (np.sqrt(np.mean(y ** 2)) + 1e-9))
-
+    for extractor in FEATURE_EXTRACTORS:
+        feats.update(extractor(y, sr))
     return feats
 
 
@@ -199,12 +131,19 @@ extract_features_single = fast_extract_narrative
 
 
 def _extract_task(path_str: str):
-    """Worker task: reads 30s audio chunk once and computes 128-D narrative.
-    Returns int16 PCM to prevent Windows named pipe buffer overflow."""
+    """Worker task: reads raw audio chunk once and computes 128-D narrative on unpadded audio,
+    then pads audio to 30s int16 PCM for spectrogram representation without Windows pipe congestion."""
     try:
-        y = fast_load_audio_chunk(path_str)
-        feats = fast_extract_narrative(y)
-        y_int16 = (np.clip(y, -1.0, 1.0) * 32767.0).astype(np.int16)
+        y_raw = fast_load_audio_chunk(path_str, pad=False)
+        feats = fast_extract_narrative(y_raw)
+        
+        target_len = int(config.SAMPLE_RATE * config.CHUNK_SECONDS)
+        if len(y_raw) < target_len:
+            y_padded = np.pad(y_raw, (0, target_len - len(y_raw)))
+        else:
+            y_padded = y_raw[:target_len]
+
+        y_int16 = (np.clip(y_padded, -1.0, 1.0) * 32767.0).astype(np.int16)
         return path_str, y_int16, feats, None
     except Exception as e:
         return path_str, np.zeros(int(config.SAMPLE_RATE * config.CHUNK_SECONDS), dtype=np.int16), {}, str(e)
@@ -225,7 +164,9 @@ class UnifiedMusicScopeModel(nn.Module):
 
     def forward(self, spec: torch.Tensor, narr: torch.Tensor) -> torch.Tensor:
         # spec: (B, 1, 128, 1292), narr: (B, 128)
-        surf = self.encoder(spec)
+        # Compute encoder in AMP autocast, but run SupCon & Fusion in stable FP32
+        surf = self.encoder(spec).float()
+        narr = narr.float()
         fused = torch.cat([surf, narr], dim=1)
         z = self.supcon(fused)
         logits = self.fusion(z)
@@ -358,11 +299,17 @@ class FastMusicScopeScorer:
 
     def score_single(self, path: str) -> float:
         """Evaluates a single audio track in ~30 ms."""
-        y = fast_load_audio_chunk(path)
-        feats = fast_extract_narrative(y)
+        y_raw = fast_load_audio_chunk(path, pad=False)
+        feats = fast_extract_narrative(y_raw)
         narr_vec = self._prepare_narr_vector(feats)
 
-        specs_t = self._compute_specs_on_gpu(np.array([y]))
+        target_len = int(config.SAMPLE_RATE * config.CHUNK_SECONDS)
+        if len(y_raw) < target_len:
+            y_padded = np.pad(y_raw, (0, target_len - len(y_raw)))
+        else:
+            y_padded = y_raw[:target_len]
+
+        specs_t = self._compute_specs_on_gpu(np.array([y_padded]))
         narr_t = torch.from_numpy(np.array([narr_vec])).to(self.device, non_blocking=True)
 
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.float16):
