@@ -202,14 +202,15 @@ def main():
     print(f"      Loaded {total_val:,d} unseen tracks ({df_val['is_ai'].sum():,d} AI vs {(df_val['is_ai']==0).sum():,d} Human).\n")
 
     # Output paths (separate for fresh run vs legacy)
+    results_base = _SCRIPTS_DIR.parent / "results"
     if args.fresh:
-        results_csv = _SCRIPTS_DIR / "eval_28k_retrained_results.csv"
+        results_csv = results_base / "new_model_retrained_200k" / "eval_28k_retrained_results.csv"
         ckpt_parquet = config.PROCESSED_DATA_DIR / "eval_28k_retrained_checkpoint.parquet"
-        scorecard_png = _SCRIPTS_DIR / "eval_28k_retrained_analysis.png"
+        scorecard_png = results_base / "new_model_retrained_200k" / "eval_28k_retrained_analysis.png"
     else:
-        results_csv = _SCRIPTS_DIR / "eval_28k_results.csv"
+        results_csv = results_base / "buggy_earlier_runs" / "eval_28k_results.csv"
         ckpt_parquet = config.PROCESSED_DATA_DIR / "eval_28k_checkpoint.parquet"
-        scorecard_png = _SCRIPTS_DIR / "eval_28k_analysis.png"
+        scorecard_png = results_base / "buggy_earlier_runs" / "eval_28k_analysis.png"
 
     existing_df = None
     if ckpt_parquet.exists() and not args.fresh:

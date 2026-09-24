@@ -208,12 +208,14 @@ def main():
     print("=" * 75)
 
     # Save CSV
-    out_csv = _SCRIPTS_DIR / "eval_unseen_generators_results.csv"
+    results_dir = _SCRIPTS_DIR.parent / "results" / "new_model_retrained_200k"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = results_dir / "eval_unseen_generators_results.csv"
     df_test.to_csv(out_csv, index=False)
     print(f"\n[Saved CSV] Saved detailed predictions to: {out_csv}")
 
     # Plot figure
-    out_png = _SCRIPTS_DIR / "unseen_generators_scorecard.png"
+    out_png = results_dir / "unseen_generators_scorecard.png"
     plot_scorecard(df_test, auroc, acc, f1, out_png)
     # Also copy to artifacts dir
     try:

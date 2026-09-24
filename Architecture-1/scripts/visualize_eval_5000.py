@@ -28,11 +28,11 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-# 1. Load data
 from pathlib import Path
-csv_path = Path(__file__).resolve().parent / "eval_5000_results.csv"
+csv_path = Path(__file__).resolve().parent.parent / "results" / "old_model_5k_baseline" / "eval_5000_results.csv"
 if not csv_path.exists():
-    # Fallback to mirex if in original location
+    csv_path = Path(__file__).resolve().parent / "eval_5000_results.csv"
+if not csv_path.exists():
     csv_path = Path(__file__).resolve().parent.parent / "mirex" / "eval_5000_results.csv"
 df = pd.read_csv(str(csv_path))
 
@@ -259,7 +259,9 @@ ax6.legend(loc="upper right", frameon=True, fontsize=9)
 plt.tight_layout()
 
 # Save output plots
-output_img_local = str(Path(__file__).resolve().parent / "eval_5000_analysis.png")
+results_5k_dir = Path(__file__).resolve().parent.parent / "results" / "old_model_5k_baseline"
+results_5k_dir.mkdir(parents=True, exist_ok=True)
+output_img_local = str(results_5k_dir / "eval_5000_analysis.png")
 plt.savefig(output_img_local, bbox_inches="tight")
 plt.close()
 print(f"\n[Saved] Visual analysis dashboard saved to: {output_img_local}")

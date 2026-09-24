@@ -27,9 +27,9 @@ from evaluate_val_28k import generate_publication_scorecard
 
 
 def patch_eval_28k(
-    results_csv: Path = _SCRIPTS_DIR / "eval_28k_results.csv",
+    results_csv: Path = _SCRIPTS_DIR.parent / "results" / "buggy_earlier_runs" / "eval_28k_results.csv",
     ckpt_parquet: Path = config.PROCESSED_DATA_DIR / "eval_28k_checkpoint.parquet",
-    output_png: Path = _SCRIPTS_DIR / "eval_28k_analysis.png",
+    output_png: Path = _SCRIPTS_DIR.parent / "results" / "buggy_earlier_runs" / "eval_28k_analysis.png",
     batch_size: int = 64,
     workers: int = 12,
     chunk_size: int = 512,
